@@ -26,6 +26,28 @@ PhiForCausalLM(
   (lm_head): Linear(in_features=2048, out_features=51200, bias=True)
 )
 
+model.embed_tokens.weight: torch.Size([51200, 2048])
+for i in range(0,24)
+  model.layers.0.self_attn.q_proj.weight: torch.Size([2048, 2048])
+  model.layers.0.self_attn.q_proj.bias: torch.Size([2048])
+  model.layers.0.self_attn.k_proj.weight: torch.Size([2048, 2048])
+  model.layers.0.self_attn.k_proj.bias: torch.Size([2048])
+  model.layers.0.self_attn.v_proj.weight: torch.Size([2048, 2048])
+  model.layers.0.self_attn.v_proj.bias: torch.Size([2048])
+  model.layers.0.self_attn.dense.weight: torch.Size([2048, 2048])
+  model.layers.0.self_attn.dense.bias: torch.Size([2048])
+  model.layers.0.mlp.fc1.weight: torch.Size([8192, 2048])
+  model.layers.0.mlp.fc1.bias: torch.Size([8192])
+  model.layers.0.mlp.fc2.weight: torch.Size([2048, 8192])
+  model.layers.0.mlp.fc2.bias: torch.Size([2048])
+  model.layers.0.input_layernorm.weight: torch.Size([2048])
+  model.layers.0.input_layernorm.bias: torch.Size([2048])
+model.final_layernorm.weight: torch.Size([2048])
+model.final_layernorm.bias: torch.Size([2048])
+lm_head.weight: torch.Size([51200, 2048])
+lm_head.bias: torch.Size([51200])
+
+
 PhiConfig {
   "_name_or_path": "microsoft/phi-1_5",
   "architectures": [
@@ -56,29 +78,5 @@ PhiConfig {
   "use_cache": true,
   "vocab_size": 51200
 }
-
-model.embed_tokens.weight: torch.Size([51200, 2048])
-
-for i in range(0,24)
-  model.layers.0.self_attn.q_proj.weight: torch.Size([2048, 2048])
-  model.layers.0.self_attn.q_proj.bias: torch.Size([2048])
-  model.layers.0.self_attn.k_proj.weight: torch.Size([2048, 2048])
-  model.layers.0.self_attn.k_proj.bias: torch.Size([2048])
-  model.layers.0.self_attn.v_proj.weight: torch.Size([2048, 2048])
-  model.layers.0.self_attn.v_proj.bias: torch.Size([2048])
-  model.layers.0.self_attn.dense.weight: torch.Size([2048, 2048])
-  model.layers.0.self_attn.dense.bias: torch.Size([2048])
-  model.layers.0.mlp.fc1.weight: torch.Size([8192, 2048])
-  model.layers.0.mlp.fc1.bias: torch.Size([8192])
-  model.layers.0.mlp.fc2.weight: torch.Size([2048, 8192])
-  model.layers.0.mlp.fc2.bias: torch.Size([2048])
-  model.layers.0.input_layernorm.weight: torch.Size([2048])
-  model.layers.0.input_layernorm.bias: torch.Size([2048])
-
-
-model.final_layernorm.weight: torch.Size([2048])
-model.final_layernorm.bias: torch.Size([2048])
-lm_head.weight: torch.Size([51200, 2048])
-lm_head.bias: torch.Size([51200])
 
 """

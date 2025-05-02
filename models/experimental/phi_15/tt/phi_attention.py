@@ -1,64 +1,114 @@
 import ttnn
 from models.common.lightweightmodule import LightweightModule
-from models.tt_transformers.tt.rope import RotarySetup
+
+from models.experimental.phi_15.tt.phi_rotary_embedding import PhiRotaryEmbedding
 
 
 class PhiAttention(LightweightModule):
-    def __init__(
-        self,
-        device,
-        q_proj_weight,
-        q_proj_bias,
-        k_proj_weight,
-        k_proj_bias,
-        v_proj_weight,
-        v_proj_bias,
-        dense_weight,
-        dense_bias,
-        dim=2048,
-        heads=32,
-        rope_theta=10000,
-    ):
+    def __init__(self, device, config, parameters, layer_idx):
         super().__init__()
 
-        self.q_w = q_proj_weight
-        self.q_b = q_proj_bias
-        self.k_w = k_proj_weight
-        self.k_b = k_proj_bias
-        self.v_w = v_proj_weight
-        self.v_b = v_proj_bias
-        self.dense_weight = dense_weight
-        self.dense_bias = dense_bias
-
-        self.heads = heads
-        self.dim = dim
-        self.rope_theta = rope_theta
-        self.head_dim = dim // heads
-        self.scale = self.head_dim**-0.5
-
-        rope_setup_decode = RotarySetup(device, self.head_dim, dim, rope_theta, use_scaled_rope=None)
-
-        self.transformation_mats_decode = rope_setup_decode.get_trans_mats()
-
-        # Projections
-        self.qkv = nn.Linear(dim, dim * 3)
-        self.out = nn.Linear(dim, dim)
-
-    def forward(self, x):
-        batch_sz, _, seq_len = x.shape
-        qkv = self.qkv(x).reshape(batch_sz, seq_len, 3, self.heads, self.head_dim).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]  # (B, heads, T, head_dim)
-
-        position_ids = ttnn.arange(batch_sz)
-        cos, sin = self.rope_setup_decode.get_rot_mats(position_ids)
-        q = ttnn.experimental.rotary_embedding_llama(q, cos, sin, self.transformation_mats_decode, is_decode_mode=True)
-
-        k = ttnn.experimental.rotary_embedding_llama(
-            k, self.cos_matrix, self.sin_matrix, self.transformation_mats_decode, is_decode_mode=True
+        self.fused_qkv_weight = ttnn.concat(
+            [parameters.q_proj.weight, parameters.k_proj.weight, parameters.v_proj.weight], dim=-1
         )
 
-        # Flash Attention (use PyTorch 2.0+ optimized attention)
-        attn = F.scaled_dot_product_attention(q, k, v, is_causal=True)
-        attn = attn.permute(0, 2, 1, 3).reshape(batch_sz, seq_len, -1)
-        attn = ttnn.linear(attn, weight=self.dense_weight, bias=self.dense_bias)
-        return attn
+        self.fused_qkv_bias = ttnn.concat(
+            [parameters.q_proj.bias, parameters.k_proj.bias, parameters.v_proj.bias],
+            dim=-1,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+        )
+
+        self.dense_weight = parameters.dense.weight
+        self.dense_bias = ttnn.to_device(parameters.dense.bias, device, ttnn.L1_MEMORY_CONFIG)
+
+        self.num_heads = config.num_attention_heads
+        self.head_dim = config.hidden_size // config.num_attention_heads
+        self.hidden_dim = config.hidden_size
+        self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
+        self.attention_scaling = self.head_dim**-0.5
+        self.attention_dropout = config.attention_dropout
+        self.is_causal = True
+
+        self.rotary_embedding = PhiRotaryEmbedding(device, config)
+        self.layer_idx = layer_idx
+
+    # Optimized multihead attention https://docs.tenstorrent.com/tt-metal/latest/ttnn/ttnn/tutorials/ttnn_tutorials/003.html
+    def forward(
+        self,
+        hidden_states: ttnn.Tensor,
+        attention_mask: ttnn.Tensor,
+        position_ids: ttnn.Tensor,
+        past_key_values: ttnn.Tensor,
+        use_cache: bool = False,
+    ):
+        batch, seq_len, hidden_size = hidden_states.shape
+
+        assert hidden_size == self.hidden_dim
+
+        hidden_states = ttnn.to_layout(hidden_states, ttnn.TILE_LAYOUT)
+
+        fused_qkv_output = ttnn.linear(
+            hidden_states,
+            self.fused_qkv_weight,
+            bias=self.fused_qkv_bias,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+            dtype=ttnn.bfloat8_b,
+            core_grid=ttnn.CoreGrid(y=batch, x=12),
+        )
+
+        (
+            query,
+            key,
+            value,
+        ) = ttnn.transformer.split_query_key_value_and_split_heads(
+            fused_qkv_output,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+            transpose_key=False,
+            num_heads=self.num_heads,
+        )
+        ttnn.deallocate(fused_qkv_output)
+
+        query = self.rotary_embedding(query)
+        key = self.rotary_embedding(key)
+        key = ttnn.transpose(key, 2, 3)
+
+        attention_scores = ttnn.matmul(
+            query,
+            key,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+            dtype=ttnn.bfloat16,
+            core_grid=ttnn.CoreGrid(y=batch, x=12),
+        )
+        ttnn.deallocate(query)
+        ttnn.deallocate(key)
+
+        attention_probs = ttnn.transformer.attention_softmax_(
+            attention_scores, attention_mask=attention_mask, head_size=self.head_dim
+        )
+
+        context_layer = ttnn.matmul(
+            attention_probs,
+            value,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+            dtype=ttnn.bfloat8_b,
+            core_grid=ttnn.CoreGrid(y=batch, x=12),
+        )
+        ttnn.deallocate(attention_probs)
+
+        context_layer_after_concatenate_heads = ttnn.transformer.concatenate_heads(
+            context_layer,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+        )
+        ttnn.deallocate(context_layer)
+
+        self_output = ttnn.linear(
+            context_layer_after_concatenate_heads,
+            self.dense_weight,
+            bias=self.dense_bias,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+            dtype=ttnn.bfloat16,
+            core_grid=ttnn.CoreGrid(y=batch, x=12),
+        )
+        ttnn.deallocate(context_layer_after_concatenate_heads)
+
+        return self_output, past_key_values
